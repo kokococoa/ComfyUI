@@ -29,7 +29,7 @@ import itertools
 from torch.nn.functional import interpolate
 from tqdm.auto import trange
 from einops import rearrange
-from comfy.cli_args import args, enables_dynamic_vram
+from comfy.cli_args import args
 import json
 import time
 import mmap
@@ -113,7 +113,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if enables_dynamic_vram():
+            if comfy.memory_management.aimdo_enabled:
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None
@@ -869,19 +869,30 @@ def safetensors_header(safetensors_path, max_size=100*1024*1024):
 
 ATTR_UNSET={}
 
-def set_attr(obj, attr, value):
+def resolve_attr(obj, attr):
     attrs = attr.split(".")
     for name in attrs[:-1]:
         obj = getattr(obj, name)
-    prev = getattr(obj, attrs[-1], ATTR_UNSET)
+    return obj, attrs[-1]
+
+def set_attr(obj, attr, value):
+    obj, name = resolve_attr(obj, attr)
+    prev = getattr(obj, name, ATTR_UNSET)
     if value is ATTR_UNSET:
-        delattr(obj, attrs[-1])
+        delattr(obj, name)
     else:
-        setattr(obj, attrs[-1], value)
+        setattr(obj, name, value)
     return prev
 
 def set_attr_param(obj, attr, value):
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
+
+def set_attr_buffer(obj, attr, value):
+    obj, name = resolve_attr(obj, attr)
+    prev = getattr(obj, name, ATTR_UNSET)
+    persistent = name not in getattr(obj, "_non_persistent_buffers_set", set())
+    obj.register_buffer(name, value, persistent=persistent)
+    return prev
 
 def copy_to_param(obj, attr, value):
     # inplace update tensor instead of replacing it
@@ -1154,7 +1165,7 @@ def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap = 8, upscale_am
     return tiled_scale_multidim(samples, function, (tile_y, tile_x), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=output_device, pbar=pbar)
 
 def model_trange(*args, **kwargs):
-    if comfy.memory_management.aimdo_allocator is None:
+    if not comfy.memory_management.aimdo_enabled:
         return trange(*args, **kwargs)
 
     pbar = trange(*args, **kwargs, smoothing=1.0)
